@@ -233,6 +233,11 @@ testResult_t InitData(void* data, const size_t count, size_t offset, ncclDataTyp
   return testSuccess;
 }
 
+testResult_t InitDataSkewed(void* data, const size_t count, size_t offset, ncclDataType_t type, ncclRedOp_t op, uint64_t seed, int nranks, int rank) {
+
+
+}
+
 void Barrier(struct threadArgs *args) {
   thread_local int epoch = 0;
   static pthread_mutex_t lock[2] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER};
@@ -325,7 +330,7 @@ testResult_t CheckData(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
 
   int64_t *wrongPerGpu = nullptr;
   CUDACHECK(hipHostMalloc((void**)&wrongPerGpu, args->nGpus*sizeof(int64_t), cudaHostAllocMapped));
-  
+
   for (int i=0; i<args->nGpus; i++) {
     int rank = ((args->proc*args->nThreads + args->thread)*args->nGpus + i);
     CUDACHECK(cudaSetDevice(args->gpus[i]));
@@ -365,14 +370,14 @@ testResult_t CheckData(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
   if (args->reportErrors && *wrongElts) args->errors[0]++;
   return testSuccess;
 }
-    
+
 testResult_t testStreamSynchronize(int ngpus, cudaStream_t* streams, ncclComm_t* comms) {
   cudaError_t cudaErr;
   int remaining = ngpus;
   int* done = (int*)malloc(sizeof(int)*ngpus);
   memset(done, 0, sizeof(int)*ngpus);
   timer tim;
-  
+
   while (remaining) {
    int idle = 1;
    for (int i=0; i<ngpus; i++) {
@@ -437,7 +442,7 @@ testResult_t startColl(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
     size_t steps = totalnbytes ? args->maxbytes / totalnbytes : 1;
     shift = totalnbytes * (iter % steps);
   }
-  
+
   if (args->nGpus > 1) NCCLCHECK(ncclGroupStart());
   for (int i = 0; i < args->nGpus; i++) {
 #ifndef NCCL_MAJOR
@@ -699,7 +704,10 @@ testResult_t TimeTest(struct threadArgs* args, ncclDataType_t type, const char* 
   Barrier(args);
 
   // Warm-up for large size
+if TEST_SKEWED_WORKLOAD == 1
+#else
   setupArgs(args->maxbytes, type, args);
+#endif
 #if HIP_VERSION >= 50221310
   cudaGraph_t graphs[args->nGpus];
   cudaGraphExec_t graphExec[args->nGpus];
@@ -803,10 +811,11 @@ testResult_t TimeTest(struct threadArgs* args, ncclDataType_t type, const char* 
   for (size_t iter = 0; iter < stress_cycles; iter++) {
     if (iter > 0) PRINT("# Testing %lu cycle.\n", iter+1);
     // Benchmark
+
     for (size_t size = args->minbytes; size<=args->maxbytes; size = ((args->stepfactor > 1) ? size*args->stepfactor : size+args->stepbytes)) {
         setupArgs(size, type, args);
 	char rootName[100];
-	sprintf(rootName, "%6i", root);	
+	sprintf(rootName, "%6i", root);
 	PRINT("%12li  %12li  %8s  %6s  %6s", std::max(args->sendBytes, args->expectedBytes), args->nbytes / wordSize(type), typeName, opName, rootName);
 	if (enable_out_of_place) {
         	TESTCHECK(BenchTime(args, type, op, root, 0));
@@ -903,6 +912,46 @@ testResult_t AllocateBuffs(void **sendbuff, size_t sendBytes, void **recvbuff, s
     CUDACHECK(cudaMalloc(sendbuff, nbytes));
     CUDACHECK(cudaMalloc(recvbuff, nbytes));
     if (datacheck) CUDACHECK(cudaMalloc(expected, recvBytes));
+  }
+  return testSuccess;
+}
+
+
+testResult_t AllocateBuffsSkewed(void **sendbuff, void **recvbuff, void **expected, void ** tempbuff, void ** syncbuff, uint gpu_n, uint nranks) {
+  if (memorytype == ncclFine) {
+    CUDACHECK(hipExtMallocWithFlags(sendbuff, gpu_n * nranks * MAX_BUFFER_SIZE_PER_RANK, hipDeviceMallocFinegrained));
+    CUDACHECK(hipExtMallocWithFlags(recvbuff, nranks * MAX_BUFFER_SIZE_PER_RANK, hipDeviceMallocFinegrained));
+    CUDACHECK(hipExtMallocWithFlags(tempbuff, 2 * gpu_n * gpu_n * MAX_BUFFER_SIZE_PER_RANK, hipDeviceMallocFinegrained));
+    CUDACHECK(hipExtMallocWithFlags(syncbuff, 2 * nranks * 8, hipDeviceMallocFinegrained));
+    if (datacheck) CUDACHECK(hipExtMallocWithFlags(expected, nranks * MAX_BUFFER_SIZE_PER_RANK, hipDeviceMallocFinegrained));
+  }
+  else if (memorytype == ncclHost) {
+    CUDACHECK(hipHostMalloc(sendbuff, gpu_n * nranks * MAX_BUFFER_SIZE_PER_RANK));
+    CUDACHECK(hipHostMalloc(recvbuff, nranks * MAX_BUFFER_SIZE_PER_RANK));
+    CUDACHECK(hipHostMalloc(tempbuff, 2 * gpu_n * gpu_n * MAX_BUFFER_SIZE_PER_RANK));
+    CUDACHECK(hipHostMalloc(syncbuff, 2 * nranks * 8));
+    if (datacheck) CUDACHECK(hipHostMalloc(expected, nranks * MAX_BUFFER_SIZE_PER_RANK));
+  }
+  else if (memorytype == ncclManaged) {
+    CUDACHECK(cudaMallocManaged(sendbuff, gpu_n * nranks * MAX_BUFFER_SIZE_PER_RANK));
+    CUDACHECK(cudaMallocManaged(recvbuff, nranks * MAX_BUFFER_SIZE_PER_RANK));
+    CUDACHECK(cudaMallocManaged(tempbuff, 2 * gpu_n * gpu_n * MAX_BUFFER_SIZE_PER_RANK));
+    CUDACHECK(cudaMallocManaged(syncbuff, 2 * nranks * 8));
+    if (datacheck) CUDACHECK(cudaMallocManaged(expected, nranks * MAX_BUFFER_SIZE_PER_RANK));
+#if 0
+    CUDACHECK(cudaMemset(sendbuff, 0, gpu_n * nranks * MAX_BUFFER_SIZE_PER_RANK));
+    CUDACHECK(cudaMemset(recvbuff, 0, nranks * MAX_BUFFER_SIZE_PER_RANK));
+    CUDACHECK(cudaMemset(tempbuff, 0, 2 * gpu_n * gpu_n * MAX_BUFFER_SIZE_PER_RANK));
+    CUDACHECK(cudaMemset(syncbuff, 0, 2 * nranks * 8));
+    if (datacheck) CUDACHECK(cudaMemset(expected, 0, nranks * MAX_BUFFER_SIZE_PER_RANK));
+#endif
+  }
+  else {
+    CUDACHECK(cudaMalloc(sendbuff, gpu_n * nranks * MAX_BUFFER_SIZE_PER_RANK));
+    CUDACHECK(cudaMalloc(recvbuff, nranks * MAX_BUFFER_SIZE_PER_RANK));
+    CUDACHECK(cudaMalloc(tempbuff, 2 * gpu_n * gpu_n * MAX_BUFFER_SIZE_PER_RANK));
+    CUDACHECK(cudaMalloc(syncbuff, 2 * nranks * 8));
+    if (datacheck) CUDACHECK(cudaMalloc(expected, nranks * MAX_BUFFER_SIZE_PER_RANK));
   }
   return testSuccess;
 }
@@ -1165,6 +1214,17 @@ int main(int argc, char* argv[]) {
   return 0;
 }
 
+
+void demand_matrix_under_uniform_distribution(size_t mean, uint *r, int nranks){
+    srand((unsigned)time(NULL));
+    size_t count_bound = std::min(MAX_BUFFER_SIZE_PER_RANK,  mean/nranks * 2) / 8;
+    for (uint i = 0; i < nranks; i++){
+        for (uint j = 0; j < nranks; j++){
+            r[i  * nranks + j] = rand() % count_bound;
+        }
+    }
+}
+
 testResult_t run() {
   int totalProcs = 1, proc = 0, ncclProcs = 1, ncclProc = 0, color = 0;
   int localRank = 0;
@@ -1244,10 +1304,26 @@ testResult_t run() {
 
   // We need sendbuff, recvbuff, expected (when datacheck enabled), plus 1G for the rest.
   size_t memMaxBytes = (maxMem - (1<<30)) / (datacheck ? 3 : 2);
+#if TEST_SKEWED_WORKLOAD == 1
+    memMaxBytes = (maxMem - (1<<30));
+    size_t required_bytes = nGpus * nThreads * nGpus * MAX_BUFFER_SIZE_PER_RANK +
+               nGpus * nThreads * MAX_BUFFER_SIZE_PER_RANK +
+               2 * nGpus * nGpus * MAX_BUFFER_SIZE_PER_RANK +
+               nGpus * nThreads * MAX_BUFFER_SIZE_PER_RANK +
+               2 * nGpus * nThreads * 8;
+#endif
   if (maxBytes > memMaxBytes) {
     maxBytes = memMaxBytes;
-    if (proc == 0) printf("#\n# Reducing maxBytes to %ld due to memory limitation\n", maxBytes);
+    if (proc == 0) {
+        printf("#\n# Reducing maxBytes to %ld due to memory limitation\n", maxBytes);
+    }
   }
+#if TEST_SKEWED_WORKLOAD == 1
+  if (required_bytes > memMaxBytes) {
+    printf("#\n# shutting down due to memory limitation\n");
+    return testNcclError;
+  }
+#endif
 
   ncclUniqueId ncclId;
   if (ncclProc == 0) {
@@ -1263,6 +1339,10 @@ testResult_t run() {
   void* sendbuffs[nGpus*nThreads];
   void* recvbuffs[nGpus*nThreads];
   void* expected[nGpus*nThreads];
+#if TEST_SKEWED_WORKLOAD == 1
+  void* tempbuffs[nGpus*nThreads];
+  void* syncbuffs[nGpus*nThreads];
+#endif
   size_t sendBytes, recvBytes;
 
   ncclTestEngine.getBuffSize(&sendBytes, &recvBytes, (size_t)maxBytes, (size_t)ncclProcs*nGpus*nThreads);
@@ -1272,7 +1352,11 @@ testResult_t run() {
   for (int i=0; i<nGpus*nThreads; i++) {
     gpus[i] = ((gpu0 != -1 ? gpu0 : localRank*nThreads*nGpus) + i)%numDevices;
     CUDACHECK(cudaSetDevice(gpus[i]));
+#if TEST_SKEWED_WORKLOAD == 1
+    TESTCHECK(AllocateBuffsSkewed(sendbuffs+i, recvbuffs+i, expected+i, tempbuffs+i, syncbuffs+i, nGpus, ncclProcs*nGpus*nThreads));
+#else
     TESTCHECK(AllocateBuffs(sendbuffs+i, sendBytes, recvbuffs+i, recvBytes, expected+i, (size_t)maxBytes));
+#endif
     if (streamnull)
       streams[i] = NULL;
     else
@@ -1299,9 +1383,22 @@ testResult_t run() {
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
      sendRegHandles = (local_register) ? (void **)malloc(sizeof(*sendRegHandles)*nThreads*nGpus) : NULL;
      recvRegHandles = (local_register) ? (void **)malloc(sizeof(*recvRegHandles)*nThreads*nGpus) : NULL;
+#if TEST_SKEWED_WORKLOAD == 1
+     tempRegHandles = (local_register) ? (void **)malloc(sizeof(*recvRegHandles)*nThreads*nGpus) : NULL;
+     syncRegHandles = (local_register) ? (void **)malloc(sizeof(*recvRegHandles)*nThreads*nGpus) : NULL;
+#endif
      for (int i=0; i<nGpus*nThreads; i++) {
+
+#if TEST_SKEWED_WORKLOAD == 1
+       if (local_register) NCCLCHECK(ncclCommRegister(comms[i], sendbuffs[i], nGpus * nThreads * nGpus * MAX_BUFFER_SIZE_PER_RANK, &sendRegHandles[i]));
+       if (local_register) NCCLCHECK(ncclCommRegister(comms[i], recvbuffs[i], nGpus * nThreads * MAX_BUFFER_SIZE_PER_RANK, &recvRegHandles[i]));
+       if (local_register) NCCLCHECK(ncclCommRegister(comms[i], tempbuffs[i], 2 * nGpus * nGpus * MAX_BUFFER_SIZE_PER_RANK, &tempRegHandles[i]));
+       if (local_register) NCCLCHECK(ncclCommRegister(comms[i], syncbuffs[i], 2 * nGpus * nThreads * 8, &syncRegHandles[i]));
+#else
        if (local_register) NCCLCHECK(ncclCommRegister(comms[i], sendbuffs[i], sendBytes, &sendRegHandles[i]));
        if (local_register) NCCLCHECK(ncclCommRegister(comms[i], recvbuffs[i], recvBytes, &recvRegHandles[i]));
+#endif
+
      }
 #endif
   }
@@ -1337,6 +1434,46 @@ testResult_t run() {
   struct testThread threads[nThreads];
   memset(threads, 0, sizeof(struct testThread)*nThreads);
 
+#if TEST_SKEWED_WORKLOAD == 1
+  //generate workload, run scheduler, store scheduler result
+  uint test_times = 0;
+  uint nranks = nGpus*nThreads;
+  struct scheduling_result_t * all_scheds[nGpus*nThreads];
+  uint * all_workloads[nGpus*nThreads];
+
+  gpu0 = envstr ? atoi(envstr) : -1;
+  for (int i=0; i<nGpus*nThreads; i++) {
+    gpus[i] = ((gpu0 != -1 ? gpu0 : localRank*nThreads*nGpus) + i)%numDevices;
+    CUDACHECK(cudaSetDevice(gpus[i]));
+    CUDACHECK(cudaMalloc(all_scheds + i, sizeof(scheduling_result_t) * MAX_TEST_TIMES_PER_RUN));
+    CUDACHECK(cudaMemset(all_scheds[i], 0, sizeof(scheduling_result_t) * MAX_TEST_TIMES_PER_RUN));
+    CUDACHECK(cudaMalloc(all_workloads + i, sizeof(uint) * nGpus*nThreads * MAX_TEST_TIMES_PER_RUN));
+    CUDACHECK(cudaMemset(all_workloads[i], 0, sizeof(uint) * nGpus*nThreads * MAX_TEST_TIMES_PER_RUN));
+  }
+
+
+  for (size_t size = minbytes; size<=maxbytes; size = ((stepfactor > 1) ? size*stepfactor : size+stepbytes)) {
+        if (test_times == MAX_TEST_TIMES_PER_RUN){
+            break;
+        }
+    // generate a workload
+    uint demand_matrix[nranks * nranks];
+    demand_matrix_under_uniform_distribution(size, demand_matrix, nranks);
+
+    //run scheduler at centralized control
+    struct scheduling_result_t cur_scheduler;
+    init_global_scheduler(&cur_scheduler, nThreads, nGpus, demand_matrix);
+    run_scheduler(&cur_scheduler);
+    // copy scheduling result and demand matrix to gpu memory
+    for (int i=0; i<nGpus*nThreads; i++) {
+        CUDACHECK(cudaMemcpy(all_scheds[i][test_times], cur_scheduler.sched, sizeof(scheduling_result_t), cudaMemcpyHostToDevice));
+        CUDACHECK(cudaMemcpy(all_workloads[i][test_times * nGpus*nThreads], demand_matrix, sizeof(uint) * nGpus*nThreads, cudaMemcpyHostToDevice));
+    }
+    // free cpu scheduler
+    free_global_scheduler(&cur_scheduler);
+  }
+#endif
+
   for (int t=nThreads-1; t>=0; t--) {
     threads[t].args.minbytes=minBytes;
     threads[t].args.maxbytes=maxBytes;
@@ -1354,6 +1491,12 @@ testResult_t run() {
     threads[t].args.sendbuffs = sendbuffs+t*nGpus;
     threads[t].args.recvbuffs = recvbuffs+t*nGpus;
     threads[t].args.expected = expected+t*nGpus;
+#if TEST_SKEWED_WORKLOAD == 1
+    threads[t].args.tembuffs = tembuffs+t*nGpus;
+    threads[t].args.syncbuffs = syncbuffs+t*nGpus;
+    threads[t].args.sched = all_scheds+t*nGpus;
+    threads[t].args.count_skewed = all_workloads+t*nGpus;
+#endif
     threads[t].args.ncclId = ncclId;
     threads[t].args.comms=comms+t*nGpus;
     threads[t].args.streams=streams+t*nGpus;
@@ -1391,8 +1534,17 @@ testResult_t run() {
   if (!parallel_init) {
     for(int i=0; i<nGpus*nThreads; ++i) {
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
-      if (local_register) NCCLCHECK(ncclCommDeregister(comms[i], sendRegHandles[i]));
-      if (local_register) NCCLCHECK(ncclCommDeregister(comms[i], recvRegHandles[i]));
+
+#if TEST_SKEWED_WORKLOAD == 1
+    if (local_register) NCCLCHECK(ncclCommDeregister(comms[i], sendRegHandles[i]));
+    if (local_register) NCCLCHECK(ncclCommDeregister(comms[i], recvRegHandles[i]));
+    if (local_register) NCCLCHECK(ncclCommDeregister(comms[i], tempRegHandles[i]));
+    if (local_register) NCCLCHECK(ncclCommDeregister(comms[i], syncRegHandles[i]));
+#else
+    if (local_register) NCCLCHECK(ncclCommDeregister(comms[i], sendRegHandles[i]));
+    if (local_register) NCCLCHECK(ncclCommDeregister(comms[i], recvRegHandles[i]));
+#endif
+
 #endif
       NCCLCHECK(ncclCommDestroy(comms[i]));
     }
@@ -1404,17 +1556,36 @@ testResult_t run() {
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
     if (sendbuffs[i]) NCCLCHECK(ncclMemFree((char*)sendbuffs[i]));
     if (recvbuffs[i]) NCCLCHECK(ncclMemFree((char*)recvbuffs[i]));
+#if TEST_SKEWED_WORKLOAD == 1
+    if (tempbuffs[i]) NCCLCHECK(ncclMemFree((char*)tempbuffs[i]));
+    if (syncbuffs[i]) NCCLCHECK(ncclMemFree((char*)syncbuffs[i]));
+#endif
     if (datacheck) NCCLCHECK(ncclMemFree(expected[i]));
 #else
     if (sendbuffs[i]) CUDACHECK(cudaFree((char*)sendbuffs[i]));
     if (recvbuffs[i]) CUDACHECK(cudaFree((char*)recvbuffs[i]));
+#if TEST_SKEWED_WORKLOAD == 1
+    if (tempbuffs[i]) NCCLCHECK(cudaFree((char*)tempbuffs[i]));
+    if (syncbuffs[i]) NCCLCHECK(cudaFree((char*)syncbuffs[i]));
+#endif
     if (datacheck) CUDACHECK(cudaFree(expected[i]));
 #endif
   }
+
+#if TEST_SKEWED_WORKLOAD == 1
+    for (int i=0; i<nGpus*nThreads; i++) {
+        NCCLCHECK(ncclMemFree(all_scheds[i]));
+        NCCLCHECK(ncclMemFree(all_workloads[i]));
+    }
+#endif
   CUDACHECK(cudaFreeHost(delta));
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2,19,0)
   free(sendRegHandles);
   free(recvRegHandles);
+#if TEST_SKEWED_WORKLOAD == 1
+  free(tempRegHandles);
+  free(tempRegHandles);
+#endif
 #endif
 
   envstr = getenv("NCCL_TESTS_MIN_BW");

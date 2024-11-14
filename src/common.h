@@ -18,6 +18,8 @@
 #include <pthread.h>
 #include "nccl1_compat.h"
 #include "timer.h"
+#include <alltoall_define.h>
+#include <alltoall_global_scheduler.h>
 
 // For nccl.h < 2.13 since we define a weak fallback
 extern "C" char const* ncclGetLastError(ncclComm_t comm);
@@ -84,6 +86,7 @@ typedef enum {
   }                                                 \
 } while(0)
 
+
 struct testColl {
   const char name[20];
   void (*getCollByteCount)(
@@ -95,6 +98,20 @@ struct testColl {
   void (*getBw)(size_t count, int typesize, double sec, double* algBw, double* busBw, int nranks);
   testResult_t (*runColl)(void* sendbuff, void* recvbuff, size_t count, ncclDataType_t type,
       ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream);
+#ifdef TEST_SKEWED_WORKLOAD
+  void (*getCollByteCountSkewed)(
+      size_t (*sendbytes)[MAX_GPU_PER_SERVER], size_t *avg_sendcount,
+      size_t (*recvcount)[MAX_GPU_PER_SERVER],
+      size_t (*paramcount)[MAX_GPU_PER_SERVER][MAX_RANK_NUM],
+      size_t * sendInplaceOffset, size_t * recvInplaceOffset,
+      size_t size, int gpu_n, int nranks, size_t datasize);    // "size" serves as a relative measure for transfer size
+  testResult_t (*initDataSkewed)(struct threadArgs* args, ncclDataType_t type,
+      ncclRedOp_t op, int root, int rep, int in_place);
+  void (*getBwSkewed)(size_t average_count, int typesize, double sec, double* algBw, double* busBw, int nranks);
+  testResult_t (*runCollSkewed)(void* sendbuff, void* recvbuff, size_t count, ncclDataType_t type,
+      ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream);
+#endif
+
 };
 extern struct testColl allReduceTest;
 extern struct testColl allGatherTest;
@@ -111,8 +128,10 @@ struct testEngine {
 
 extern struct testEngine ncclTestEngine;
 
+
 struct threadArgs {
   size_t nbytes;
+  size_t average_nbytes;
   size_t minbytes;
   size_t maxbytes;
   size_t stepbytes;
@@ -131,6 +150,13 @@ struct threadArgs {
   int enable_rotating_tensor;
   void** sendbuffs;
   size_t sendBytes;
+#if TEST_SKEWED_WORKLOAD == 1
+  uint ** count_skewed;
+  struct scheduling_result_t ** sched;
+  void ** tembuffs;
+  void ** syncbuffs;
+#endif
+
   size_t sendInplaceOffset;
   void** recvbuffs;
   size_t recvInplaceOffset;

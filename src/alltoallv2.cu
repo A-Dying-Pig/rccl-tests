@@ -8,10 +8,14 @@
 #include "cuda_runtime.h"
 #include "common.h"
 #include <alltoall_global_scheduler.h>
+#include <alltoall_define.h>
+#include <stdlib.h>
+#include <time.h>
 
 #define USE_RCCL_GATHER_SCATTER
 
-void AlltoAllvGetCollByteCount(size_t *sendcount, size_t *recvcount, size_t *paramcount, size_t *sendInplaceOffset, size_t *recvInplaceOffset, size_t count, int nranks) {
+
+void AlltoAllv2GetCollByteCount(size_t *sendcount, size_t *recvcount, size_t *paramcount, size_t *sendInplaceOffset, size_t *recvInplaceOffset, size_t count, int nranks) {
   if (count < nranks*nranks/2) {
     *sendcount = 0;
     *recvcount = 0;
@@ -27,7 +31,60 @@ void AlltoAllvGetCollByteCount(size_t *sendcount, size_t *recvcount, size_t *par
   }
 }
 
-testResult_t AlltoAllvInitData(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t op, int root, int rep, int in_place) {
+testResult_t AlltoAllv2InitData(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t op, int root, int rep, int in_place) {
+
+  size_t sendcount = args->sendBytes / wordSize(type);
+  size_t recvcount = args->expectedBytes / wordSize(type);
+  int nranks = args->nProcs*args->nThreads*args->nGpus;
+
+  for (int i=0; i<args->nGpus; i++) {
+    CUDACHECK(cudaSetDevice(args->gpus[i]));
+    int rank = ((args->proc*args->nThreads + args->thread)*args->nGpus + i);
+    CUDACHECK(cudaMemset(args->recvbuffs[i], 0, args->expectedBytes));
+    for ()
+    void* data = in_place ? args->recvbuffs[i] : args->sendbuffs[i];
+    TESTCHECK(InitData(data, sendcount, 0, type, ncclSum, 33*rep+rank, 1, 0));
+
+#if 0
+    int *dataHost = (int *)malloc(args->sendBytes);
+    cudaMemcpy(dataHost, data, args->sendBytes, cudaMemcpyDeviceToHost);
+    printf(" Rank [%d] Original: ", rank);
+    for(int j=0; j<sendcount; j++) {
+	    printf("%d:%d ", j, dataHost[j]);
+    }
+    printf("\n");
+    free(dataHost);
+#endif
+
+    size_t rdisp = 0;
+    size_t data_count = sendcount*2/nranks;
+    size_t chunksize = data_count/nranks;
+    for (int j=0; j<nranks; j++) {
+      size_t scount = 0, rcount = ((j+rank)%nranks)*chunksize;
+      if ((j+rank)%nranks == 0)
+        rcount += (sendcount-chunksize*(nranks-1)*nranks/2);
+      size_t sdisp = 0;
+      for (int k=0; k<nranks; k++) {
+        scount = ((k+j)%nranks)*chunksize;
+        if ((k+j)%nranks == 0)
+          scount += (sendcount-chunksize*(nranks-1)*nranks/2);
+        if (k == rank)
+          break;
+        sdisp += scount;
+      }
+      TESTCHECK(InitData(((char*)args->expected[i])+rdisp*wordSize(type), rcount, sdisp, type, ncclSum, 33*rep+j, 1, 0));
+      rdisp += rcount;
+    }
+    CUDACHECK(cudaDeviceSynchronize());
+  }
+  // We don't support in-place alltoall
+  args->reportErrors = in_place ? 0 : 1;
+  return testSuccess;
+}
+
+
+
+testResult_t AlltoAllv2InitDataSkewed(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t op, int root, int rep, int in_place) {
   size_t sendcount = args->sendBytes / wordSize(type);
   size_t recvcount = args->expectedBytes / wordSize(type);
   int nranks = args->nProcs*args->nThreads*args->nGpus;
@@ -76,7 +133,7 @@ testResult_t AlltoAllvInitData(struct threadArgs* args, ncclDataType_t type, ncc
   return testSuccess;
 }
 
-void AlltoAllvGetBw(size_t count, int typesize, double sec, double* algBw, double* busBw, int nranks) {
+void AlltoAllv2GetBw(size_t count, int typesize, double sec, double* algBw, double* busBw, int nranks) {
   double baseBw = (double)(count * nranks * typesize) / 1.0E9 / sec;
 
   *algBw = baseBw;
@@ -84,15 +141,25 @@ void AlltoAllvGetBw(size_t count, int typesize, double sec, double* algBw, doubl
   *busBw = baseBw * factor;
 }
 
-testResult_t AlltoAllvRunColl(void* sendbuff, void* recvbuff, size_t count, ncclDataType_t type, ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream) {
+void AlltoAllv2GetBwSkewed(size_t average_count, int typesize, double sec, double* algBw, double* busBw, int nranks) {
+  double baseBw = (double)(average_count * nranks * typesize) / 1.0E9 / sec;
+
+  *algBw = baseBw;
+  double factor = ((double)(nranks-1))/((double)(nranks));
+  *busBw = baseBw * factor;
+}
+
+
+testResult_t AlltoAllv2RunColl(void* sendbuff, void* recvbuff, size_t count, ncclDataType_t type, ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream) {
   int nranks;
   NCCLCHECK(ncclCommCount(comm, &nranks));
   int rank;
   NCCLCHECK(ncclCommUserRank(comm, &rank));
 
-  if (count == 0) return testSuccess;
+  size_t* sendcounts, *sendpos, *recvcounts, *recvpos;
 
-  size_t *sendcounts, *recvcounts, *sdispls, *rdispls;
+
+
   sendcounts = (size_t *)malloc(nranks*nranks*sizeof(size_t));
   recvcounts = (size_t *)malloc(nranks*nranks*sizeof(size_t));
   sdispls = (size_t *)malloc(nranks*nranks*sizeof(size_t));
@@ -153,19 +220,19 @@ testResult_t AlltoAllvRunColl(void* sendbuff, void* recvbuff, size_t count, nccl
 }
 
 struct testColl alltoAllTest = {
-  "AlltoAllv",
-  AlltoAllvGetCollByteCount,
-  AlltoAllvInitData,
-  AlltoAllvGetBw,
-  AlltoAllvRunColl
+  "AlltoAllv2",
+  AlltoAllv2GetCollByteCount,
+  AlltoAllv2InitData,
+  AlltoAllv2GetBw,
+  AlltoAllv2RunColl
 };
 
-void AlltoAllvGetBuffSize(size_t *sendcount, size_t *recvcount, size_t count, int nranks) {
+void AlltoAllv2GetBuffSize(size_t *sendcount, size_t *recvcount, size_t count, int nranks) {
   size_t paramcount, sendInplaceOffset, recvInplaceOffset;
-  AlltoAllvGetCollByteCount(sendcount, recvcount, &paramcount, &sendInplaceOffset, &recvInplaceOffset, count, nranks);
+  AlltoAllv2GetCollByteCount(sendcount, recvcount, &paramcount, &sendInplaceOffset, &recvInplaceOffset, count, nranks);
 }
 
-testResult_t AlltoAllvRunTest(struct threadArgs* args, int root, ncclDataType_t type, const char* typeName, ncclRedOp_t op, const char* opName) {
+testResult_t AlltoAllv2RunTest(struct threadArgs* args, int root, ncclDataType_t type, const char* typeName, ncclRedOp_t op, const char* opName) {
   args->collTest = &alltoAllTest;
   ncclDataType_t *run_types;
   const char **run_typenames;
@@ -188,6 +255,6 @@ testResult_t AlltoAllvRunTest(struct threadArgs* args, int root, ncclDataType_t 
 }
 
 struct testEngine ncclTestEngine = {
-  AlltoAllvGetBuffSize,
-  AlltoAllvRunTest
+  AlltoAllv2GetBuffSize,
+  AlltoAllv2RunTest
 };
