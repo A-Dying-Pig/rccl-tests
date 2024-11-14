@@ -20,7 +20,7 @@ LDFLAGS    :=
 HIPLDFLAGS :=
 
 ifneq ($(NCCL_HOME), "")
-HIPCUFLAGS += -I$(NCCL_HOME)/ -I$(NCCL_HOME)/include
+HIPCUFLAGS += -I$(NCCL_HOME)/ -I$(NCCL_HOME)/include -I$(NCCL_HOME)/hipify/src/include/fast_alltoall
 HIPLDFLAGS   += -Wl,-rpath,$(NCCL_HOME) -L$(NCCL_HOME) -L$(NCCL_HOME)/lib
 endif
 HIPCUFLAGS += -I$(ROCM_PATH)/include
@@ -59,7 +59,8 @@ HIPLDFLAGS   += $(LIBRARIES:%=-l%)
 DST_DIR := $(BUILDDIR)
 SRC_FILES := $(wildcard *.cu)
 OBJ_FILES := $(SRC_FILES:%.cu=${DST_DIR}/%.o)
-BIN_FILES_LIST := all_reduce all_gather broadcast reduce_scatter reduce alltoall scatter gather sendrecv alltoallv
+# BIN_FILES_LIST := all_reduce all_gather broadcast reduce_scatter reduce alltoall scatter gather sendrecv alltoallv alltoallv2
+BIN_FILES_LIST := alltoall alltoallv alltoallv2
 BIN_FILES := $(BIN_FILES_LIST:%=${DST_DIR}/%_perf)
 
 GIT_VERSION_FILE := ${DST_DIR}/src/git_version.cpp
